@@ -1,0 +1,12 @@
+[project]
+name = "nlp-scraper"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "feedparser>=6.0.14",
+    "pandas>=3.0.6",
+    "requests>=2.34.2",
+    "trafilatura>=2.3.1",
+]
