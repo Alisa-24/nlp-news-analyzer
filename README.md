@@ -55,9 +55,10 @@ it is automatically trained on `bbc_news_train.csv` and evaluated on
 
 All analysis is handled by the `NewsNLP` class in `nlp_enriched_news.py`:
 
-1. **Preprocessing:** spaCy normalizes text, removes stop words and punctuation,
-   and produces lemmas, tokens, and sentences.
-2. **Entities:** spaCy NER detects `ORG` mentions in the original headline and body.
+1. **Preprocessing:** spaCy keeps alphabetic words, removes stop words, and returns
+   lowercase lemmas as one cleaned string.
+2. **Entities:** spaCy NER returns a list of unique `ORG` names from the original
+   headline and body.
 3. **Topics:** TF-IDF and logistic regression predict Tech, Sport, Business,
    Entertainment, or Politics.
 4. **Sentiment:** NLTK VADER predicts positive, negative, or neutral.
@@ -80,7 +81,7 @@ The CSV contains exactly seven columns:
 | `topic` | Predicted news category |
 | `sentiment` | Positive, negative, or neutral label |
 | `scandal_score` | Environmental relevance score from 0 to 1; higher means a closer match |
-| `top_10` | Whether the article is a top-ten qualifying candidate |
+| `top_10` | Whether the article is one of the ten highest-scoring review candidates |
 
 ## Topic model
 
@@ -106,23 +107,37 @@ The script saves:
 The keywords are specific phrases such as **oil spill**, **toxic wastewater
 discharge**, **illegal logging**, and **hazardous gas leak**. They cover water
 pollution, air pollution, deforestation, soil contamination, marine damage,
-and industrial disasters. Standalone words such as fire, gas, or disaster
-are not enough to trigger a match.
+and industrial disasters. These specific phrases are the embedding references;
+standalone words such as fire, gas, or disaster are not used as reference phrases.
 
 We use [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
 because it is a small pretrained sentence-embedding model that runs on CPU
 and captures meaning beyond exact word matches.
 
-Only sentences containing a detected organization and qualified incident
-language are scored. **Cosine similarity** compares their embeddings with
+Every sentence containing a detected organization is scored, without requiring
+an exact keyword or regex match. **Cosine similarity** compares its embedding with
 the disaster-phrase embeddings. It compares semantic direction rather than
 vector magnitude, so related descriptions can match despite different wording.
 
-The article score is its strongest sentence/phrase match. Internally,
-`scandal_distance = 1 - scandal_score`. Up to ten articles with supporting
-evidence and a score of at least **0.5** are flagged after all articles are
-processed. This threshold is configurable with `--min-score`; fewer than ten
-articles are flagged if fewer qualify.
+For each ORG-containing sentence, the model finds the minimum cosine distance
+to any disaster phrase. `scandal_distance` is the average of those sentence
+distances. Long sentences can use overlapping windows; only their best window
+contributes, so each original sentence counts once.
+
+The CSV uses `scandal_score = max(0, 1 - scandal_distance)`, so a higher score
+still means stronger relevance. Articles without organizations or matching
+organization-containing sentences get distance 1, score 0, and no involved organizations.
+
+`detect_scandal(text, entities)` returns the average distance and organization
+names from sentences with distance below 0.4 (similarity above 0.6). It matches
+whole organization names without case sensitivity, so `AI` does not match `chair`. This strict
+entity threshold is separate from the article ranking and may return an empty
+list even when an article appears in the review shortlist.
+
+After all articles are processed, the
+ten highest-scoring articles with ORG-containing sentence evidence are flagged.
+There is no fixed similarity cutoff. If fewer than ten articles contain an
+ORG sentence, only those articles can be flagged. Ties keep input order.
 
 These are review candidates, not proof of company responsibility. ORG also
 includes institutions and teams, and the model can misinterpret context.

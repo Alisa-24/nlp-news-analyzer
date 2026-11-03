@@ -2,18 +2,16 @@
 
 import argparse
 from datetime import date
-from html import unescape
 import json
 from pathlib import Path
 import pickle
-import re
 import sys
-import unicodedata
 
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from sklearn.metrics.pairwise import cosine_similarity
 import spacy
+from spacy.matcher import PhraseMatcher
 import pandas as pd
 
 
@@ -31,22 +29,6 @@ class NewsNLP:
     PHRASE_CATEGORIES = {
         phrase: category for category, phrases in DISASTER_KEYWORDS.items() for phrase in phrases
     }
-
-    # Each incident term needs a nearby environmental qualifier, never a lone keyword.
-    INCIDENT_CONTEXTS = (
-        (r"\boil\b", r"\b(?:spill(?:s|ed|ing|ages?)?|leak(?:s|ed|ing)?)\b"),
-        (r"\btoxic\s+(?:wastewater|effluent)\b", r"\bdischarg\w*\b"),
-        (r"\bchemicals?\b", r"\b(?:contaminat\w*|discharg\w*|leak(?:s|ed|ing)?)\b"),
-        (r"\btoxic\b", r"\b(?:emissions?|emit(?:s|ted|ting)?)\b"),
-        (r"\bhazardous\s+gas\b", r"\bleak(?:s|ed|ing)?\b"),
-        (r"\bindustrial\b", r"\bair\s+pollution\b"),
-        (r"\billegal(?:ly)?\b", r"\blogg(?:ing|ed)\b"),
-        (r"\b(?:rain)?forests?\b", r"\bclear(?:ance|ed|ing|s)?\b"),
-        (r"\bunauthori[sz]ed\b", r"\bdeforest\w*\b"),
-        (r"\btoxic\s+waste\b", r"\bdump(?:s|ed|ing)?\b"),
-        (r"\bindustrial\s+soil\b", r"\bcontaminat\w*\b"),
-        (r"\bhazardous\s+waste\b", r"\bspill(?:s|ed|ing|ages?)?\b"),
-    )
 
     TOPICS = {
         "tech": "Tech",
@@ -78,62 +60,21 @@ class NewsNLP:
             print(message, flush=True)
 
     def preprocess_text(self, text):
-        text = unescape(text)
-        text = unicodedata.normalize("NFKC", text)
-        text = " ".join(text.split())
         document = self.nlp(text, disable=["ner"])
-
-        tokens = []
-        for token in document:
-            if token.is_stop or token.is_punct or token.is_space:
-                continue
-            if token.like_url or token.like_email:
-                continue
-
-            lemma = token.lemma_.lower()
-            lemma = "".join(character for character in lemma if character.isalnum())
-            if lemma:
-                tokens.append(lemma)
-
-        sentences = [sentence.text.strip() for sentence in document.sents]
-        return {
-            "cleaned_text": " ".join(tokens),
-            "tokens": tokens,
-            "sentences": [sentence for sentence in sentences if sentence],
-        }
+        return " ".join(
+            token.lemma_.lower() for token in document
+            if token.is_alpha and not token.is_stop
+        )
 
     def detect_entities(self, headline, body):
         organizations = []
-        mentions = []
-        seen_names = set()
-
-        # Original text preserves capitalization and the entity positions.
-        fields = ["headline", "body"]
-        documents = self.nlp.pipe(
-            [headline, body],
-            disable=["tagger", "attribute_ruler", "lemmatizer"],
-        )
-
-        for field, document in zip(fields, documents):
+        for document in self.nlp.pipe(
+            [headline, body], disable=["tagger", "attribute_ruler", "lemmatizer"]
+        ):
             for entity in document.ents:
-                if entity.label_ != "ORG":
-                    continue
-
-                name = " ".join(entity.text.split())
-                name_key = unicodedata.normalize("NFKC", name).casefold()
-                if name_key not in seen_names:
-                    seen_names.add(name_key)
-                    organizations.append(name)
-
-                mentions.append({
-                    "text": entity.text,
-                    "label": "ORG",
-                    "field": field,
-                    "start_char": entity.start_char,
-                    "end_char": entity.end_char,
-                })
-
-        return {"org": organizations, "org_mentions": mentions}
+                if entity.label_ == "ORG" and entity.text not in organizations:
+                    organizations.append(entity.text)
+        return organizations
 
     def load_topic_classifier(self, model_path=None):
         path = self.topic_model_path if model_path is None else Path(model_path)
@@ -209,57 +150,53 @@ class NewsNLP:
 
         return {"sentiment": sentiment, "sentiment_scores": scores}
 
+    def detect_scandal(self, text, entities):
+        if not entities:
+            return 1.0, []
+        result = self.detect_environmental_disaster("", text, entities)
+        return result["scandal_distance"], result["scandal_entities"]
+
     def detect_environmental_disaster(self, headline, body, entities=None):
         if entities is None:
             entities = self.detect_entities(headline, body)
 
-        # Keep only organization-linked sentences with qualified incident language.
+        result = {
+            "environmental_risk_score": 0.0,
+            "scandal_distance": 1.0,
+            "scandal_entities": [],
+            "environmental_evidence": [],
+            "environmental_model": self.ENVIRONMENTAL_MODEL,
+            "top_10": False,
+        }
+        if not entities:
+            self._log("  ORG-containing sentences to score: 0")
+            return result
+
+        # Match full organization names rather than substrings.
+        matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
+        matcher.add("ORG", [self.nlp.make_doc(name) for name in entities])
         sentences = []
         sentencizer = self.nlp.get_pipe("sentencizer")
         for field, text in (("headline", headline), ("body", body)):
             document = sentencizer(self.nlp.make_doc(text))
             for sentence in document.sents:
-                organizations = []
-                for mention in entities["org_mentions"]:
-                    if (
-                        mention["field"] == field
-                        and mention["start_char"] >= sentence.start_char
-                        and mention["end_char"] <= sentence.end_char
-                    ):
-                        name = " ".join(mention["text"].split())
-                        if name not in organizations:
-                            organizations.append(name)
+                sentence_doc = sentence.as_doc()
+                organizations = list(dict.fromkeys(
+                    sentence_doc[start:end].text
+                    for _, start, end in matcher(sentence_doc)
+                ))
                 if not organizations:
                     continue
 
-                context = " ".join(sentence.text.split())
-                is_incident = False
-                for qualifier, incident in self.INCIDENT_CONTEXTS:
-                    for match in re.finditer(qualifier, context, flags=re.IGNORECASE):
-                        nearby_text = context[max(0, match.start() - 120):match.end() + 120]
-                        if re.search(incident, nearby_text, flags=re.IGNORECASE):
-                            is_incident = True
-                            break
-                    if is_incident:
-                        break
+                sentences.append({
+                    "field": field,
+                    "sentence": sentence.text,
+                    "start_char": sentence.start_char,
+                    "end_char": sentence.end_char,
+                    "organizations": organizations,
+                })
 
-                if is_incident:
-                    sentences.append({
-                        "field": field,
-                        "sentence": sentence.text,
-                        "start_char": sentence.start_char,
-                        "end_char": sentence.end_char,
-                        "organizations": organizations,
-                    })
-
-        self._log(f"  Qualifying sentences: {len(sentences)}")
-        result = {
-            "environmental_risk_score": 0.0,
-            "scandal_distance": 1.0,
-            "environmental_evidence": [],
-            "environmental_model": self.ENVIRONMENTAL_MODEL,
-            "top_10": False,
-        }
+        self._log(f"  ORG-containing sentences to score: {len(sentences)}")
         if not sentences:
             return result
 
@@ -311,7 +248,8 @@ class NewsNLP:
         for index, sentence in enumerate(source_sentences):
             phrase_index = int(similarities[index].argmax())
             phrase = self.DISASTER_PHRASES[phrase_index]
-            score = min(1.0, max(0.0, float(similarities[index, phrase_index])))
+            score = min(1.0, max(-1.0, float(similarities[index, phrase_index])))
+            distance = 1.0 - score
             key = (sentence["field"], sentence["start_char"], sentence["end_char"])
             if key not in best_matches or score > best_matches[key]["similarity"]:
                 best_matches[key] = {
@@ -320,12 +258,26 @@ class NewsNLP:
                     "matched_phrase": phrase,
                     "matched_category": self.PHRASE_CATEGORIES[phrase],
                     "similarity": score,
+                    "distance": distance,
                 }
 
-        evidence = sorted(best_matches.values(), key=lambda match: match["similarity"], reverse=True)
+        evidence = sorted(best_matches.values(), key=lambda match: match["distance"])
+        # Each original sentence contributes once, even when split into windows.
+        average_distance = float(sum(match["distance"] for match in evidence) / len(evidence))
+        scandal_entities = []
+        seen_entities = set()
+        for match in evidence:
+            if match["distance"] < 0.4:
+                for name in match["organizations"]:
+                    key = name.casefold()
+                    if key not in seen_entities:
+                        seen_entities.add(key)
+                        scandal_entities.append(name)
+
         result["environmental_evidence"] = evidence
-        result["environmental_risk_score"] = evidence[0]["similarity"]
-        result["scandal_distance"] = 1.0 - result["environmental_risk_score"]
+        result["scandal_distance"] = average_distance
+        result["environmental_risk_score"] = max(0.0, 1.0 - average_distance)
+        result["scandal_entities"] = scandal_entities
         return result
 
     def process_article(self, article, include_topic=True, include_environment=True):
@@ -337,22 +289,20 @@ class NewsNLP:
         self._log("Preprocessing text...")
         cleaned_headline = self.preprocess_text(headline)
         cleaned_body = self.preprocess_text(body)
-        tokens = cleaned_headline["tokens"] + cleaned_body["tokens"]
-        self._log(f"  Retained tokens: {len(tokens)}")
+        cleaned_text = f"{cleaned_headline} {cleaned_body}".strip()
+        self._log(f"  Retained tokens: {len(cleaned_text.split())}")
 
         # Enrich a copy; the original article stays unchanged.
         result = article.copy()
         result.update({
-            "cleaned_headline": cleaned_headline["cleaned_text"],
-            "cleaned_body": cleaned_body["cleaned_text"],
-            "cleaned_text": " ".join(tokens),
-            "tokens": tokens,
-            "sentences": cleaned_body["sentences"],
+            "cleaned_headline": cleaned_headline,
+            "cleaned_body": cleaned_body,
+            "cleaned_text": cleaned_text,
         })
         self._log("Detecting organizations...")
         entities = self.detect_entities(headline, body)
-        result.update(entities)
-        names = ", ".join(entities["org"]) if entities["org"] else "None"
+        result["org"] = entities
+        names = ", ".join(entities) if entities else "None"
         self._log(f"  Organizations: {names}")
 
         if include_topic:
@@ -370,9 +320,11 @@ class NewsNLP:
             result.update(self.detect_environmental_disaster(headline, body, entities))
             self._log(f"  Scandal score: {result['environmental_risk_score']:.4f}")
             self._log(f"  Scandal distance: {result['scandal_distance']:.4f}")
+            names = ", ".join(result["scandal_entities"]) if result["scandal_entities"] else "None"
+            self._log(f"  Strong-match organizations (distance < 0.4): {names}")
         return result
 
-    def process_all_articles(self, input_dir=None, output_file=None, min_score=0.5, verbose=True):
+    def process_all_articles(self, input_dir=None, output_file=None, verbose=True):
         self.verbose = verbose
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -389,8 +341,6 @@ class NewsNLP:
             raise ValueError("Save results outside the source data and training CSVs.")
         if output_file.suffix.lower() != ".csv":
             raise ValueError("The output file must have a .csv extension.")
-        if not 0 <= min_score <= 1:
-            raise ValueError("min_score must be between 0 and 1.")
 
         paths = []
         for path in sorted(input_dir.glob("*/*.json")):
@@ -427,20 +377,27 @@ class NewsNLP:
             raise ValueError("No valid articles found in dated folders.")
 
         # Rank after every article has a score.
-        self._log("\nRanking environmental candidates...")
-        self._log(f"Minimum score: {min_score:.2f}")
+        self._log("\nRanking environmental review candidates...")
+        self._log("Ranking rule: select the 10 highest-scoring articles with ORG evidence.")
         articles.sort(key=lambda article: article["environmental_risk_score"], reverse=True)
         candidate_rank = 0
         for article in articles:
             article["environmental_rank"] = None
-            article["environmental_threshold"] = min_score
             article["top_10"] = False
-            if article["environmental_risk_score"] >= min_score and article["environmental_evidence"]:
+            if article["environmental_evidence"]:
                 candidate_rank += 1
                 article["environmental_rank"] = candidate_rank
                 article["top_10"] = candidate_rank <= 10
-        self._log(f"Qualifying candidates: {candidate_rank}")
+        self._log(f"Scored candidates: {candidate_rank}")
         self._log(f"Top-10 articles flagged: {min(candidate_rank, 10)}")
+
+        self._log("\nTop 10 flagged articles (review candidates):")
+        flagged_articles = [article for article in articles if article["top_10"]]
+        if not flagged_articles:
+            self._log("  None.")
+        for rank, article in enumerate(flagged_articles, start=1):
+            self._log(f"{rank}. {article['headline']}")
+            self._log(f"   ID: {article['id']} | Scandal score: {article['environmental_risk_score']:.4f}")
 
         # Export only the seven requested fields.
         rows = []
@@ -475,10 +432,9 @@ def main():
     parser = argparse.ArgumentParser(description="Enrich all stored articles and save the results to CSV.")
     parser.add_argument("--input-dir", type=Path)
     parser.add_argument("--output-file", type=Path)
-    parser.add_argument("--min-score", type=float, default=0.5)
     args = parser.parse_args()
     try:
-        NewsNLP(verbose=True).process_all_articles(args.input_dir, args.output_file, args.min_score)
+        NewsNLP(verbose=True).process_all_articles(args.input_dir, args.output_file)
     except (OSError, ValueError) as error:
         parser.exit(1, f"Error: {error}\n")
     return 0
