@@ -1,74 +1,138 @@
-# News scraper
+# NLP News Intelligence
 
-Collect full article text from BBC News and Sport RSS feeds for the news
-intelligence project. This implements collection and duplicate removal only.
+A Python project that collects BBC news and analyzes each article to identify
+organizations, topics, sentiment, and possible environmental incidents.
 
-The pipeline uses three libraries: `requests` downloads RSS feeds and article
-pages, `feedparser` reads feed entries, and `trafilatura` extracts the full
-article text from HTML. A few Python functions handle JSON storage and duplicates.
+## Project structure
 
-## Run
+```text
+nlp-scraper/
+├── scraper_news.py               # Scraper for BBC news articles
+├── nlp_enriched_news.py          # nlp pipeline for topics, sentiment, and environmental scoring
+├── main.py                       # Starter script
+├── bbc_news_train.csv
+├── bbc_news_tests.csv
+├── data/                         # Scraped articles
+│   └── YYYY-MM-DD/
+│       └── <article-id>.json
+├── results/
+│   ├── training_model.py
+│   ├── topic_classifier.pkl
+│   ├── learning_curves.png
+│   ├── topic_metrics.json
+│   ├── enhanced_news.csv         # Current NLP output
+│   └── environmental_ranking.json # Earlier ranking export
+├── pyproject.toml
+├── requirements.txt
+├── uv.lock
+└── README.md
+```
 
-From the project directory, install the dependencies and run:
+## Setup and run
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Run these commands
+from the project folder:
 
 ```powershell
 uv sync
 uv run python scraper_news.py
+uv run python nlp_enriched_news.py
 ```
 
-Alternatively, install `requirements.txt` into your Python environment with
-`python -m pip install -r requirements.txt`, then run `python scraper_news.py`.
+The scraper saves articles in `data/YYYY-MM-DD/<id>.json`. The NLP script reads
+those files and saves the results to `results/enhanced_news.csv`.
+It prints progress for each article and leaves the source JSON files unchanged.
 
-By default it checks 21 BBC section feeds, considers articles published within
-the last seven days, and saves up to 300 **new** articles per run. Requests are
-sequential, spaced by 0.5 seconds, and use a 25-second timeout.
-Individual feed or article failures are logged and skipped without automatic retries.
-Live blogs, audio/video URLs and pages with fewer than 50 extracted words are
-skipped. RSS descriptions are never used as a substitute for article text.
+The scraper collects up to 300 new articles from the past seven days per run.
+It removes duplicates by URL or normalized article text. RSS may provide fewer
+than 300 articles; later runs can collect new stories.
 
-RSS is a recent snapshot, not a searchable archive. A single run may provide
-fewer than 300 usable, unique articles. Run again as new items appear to build
-the corpus; the scraper stops after processing the available items. Older
-stored articles are retained when collecting newer articles.
-Feeds and their entries are processed in their listed order.
+Pretrained resources download when needed. If the topic model is missing,
+it is automatically trained on `bbc_news_train.csv` and evaluated on
+`bbc_news_tests.csv`.
+
+## What the NLP pipeline does
+
+All analysis is handled by the `NewsNLP` class in `nlp_enriched_news.py`:
+
+1. **Preprocessing:** spaCy normalizes text, removes stop words and punctuation,
+   and produces lemmas, tokens, and sentences.
+2. **Entities:** spaCy NER detects `ORG` mentions in the original headline and body.
+3. **Topics:** TF-IDF and logistic regression predict Tech, Sport, Business,
+   Entertainment, or Politics.
+4. **Sentiment:** NLTK VADER predicts positive, negative, or neutral.
+5. **Environmental incidents:** sentence embeddings score relevant organization-linked
+   sentences against specific disaster phrases.
+
+`process_article()` returns the analysis for one article.
+`process_all_articles()` processes the saved collection, ranks candidates,
+and exports the CSV.
+
+## CSV output
+
+The CSV contains exactly seven columns:
+
+| Column | Description |
+| --- | --- |
+| `id` | Unique article ID |
+| `article` | Original headline and full article body |
+| `entities` | Detected organization names, stored as a JSON list |
+| `topic` | Predicted news category |
+| `sentiment` | Positive, negative, or neutral label |
+| `scandal_score` | Environmental relevance score from 0 to 1; higher means a closer match |
+| `top_10` | Whether the article is a top-ten qualifying candidate |
+
+## Topic model
+
+The supplied datasets are `bbc_news_train.csv` and `bbc_news_tests.csv`.
+Training removes duplicate and overlapping training texts in memory without
+changing either CSV. The saved model achieved **98.37% test accuracy**
+(723/735 correct) and **97.65% five-fold validation accuracy**.
+
+To retrain and regenerate the learning curves:
 
 ```powershell
-# Small collection from one feed
-uv run python scraper_news.py --feed https://feeds.bbci.co.uk/news/rss.xml --max-articles 5
-
-# Change the destination or publication lookback
-uv run python scraper_news.py --output-dir data/bbc --days 7
-
-# Clean existing scraper records without downloading anything
-uv run python scraper_news.py --deduplicate-only
+uv run python results/training_model.py
 ```
 
-Use `--help` for all options. Repeat `--feed` to select multiple feeds.
+The script saves:
 
-## Stored articles
+- `results/topic_classifier.pkl`: TF-IDF vectorizer and logistic regression together.
+- `results/learning_curves.png`: training and validation learning curves.
+- `results/topic_metrics.json`: evaluation scores and data checks.
 
-UTF-8 JSON files are grouped by publication date in UTC:
+## Environmental scoring
 
-```text
-data/
-  YYYY-MM-DD/
-    <stable-article-id>.json
-```
+The keywords are specific phrases such as **oil spill**, **toxic wastewater
+discharge**, **illegal logging**, and **hazardous gas leak**. They cover water
+pollution, air pollution, deforestation, soil contamination, marine damage,
+and industrial disasters. Standalone words such as fire, gas, or disaster
+are not enough to trigger a match.
 
-Each record contains `id` (a deterministic UUID), `url`, `date` (publication
-timestamp), `date_scraped` (collection timestamp), `headline`, `body` (full
-article text with paragraph breaks), and `source` (`BBC News`). This keeps text
-and metadata together for a later NLP pipeline. The data folder is Git-ignored.
-The classifier can later read `headline` and `body` from these files; topic
-labels and model training are separate steps. The existing 300 records use
-the same format and remain compatible with this simpler scraper.
+We use [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
+because it is a small pretrained sentence-embedding model that runs on CPU
+and captures meaning beyond exact word matches.
 
-At startup the scraper scans these dated folders and deletes redundant BBC
-records, keeping the first file in sorted path order. Duplicate detection uses
-either the canonical article URL (ignoring tracking parameters, fragments and
-BBC `.com`/`.co.uk` host differences) or a SHA-256 hash of the body after Unicode,
-case and whitespace normalization. It also checks these keys before every save,
-so reruns skip stored URLs and identical text across different URLs. This is
-exact normalized-text matching; similar reporting on the same event is kept.
-Existing URLs are kept as first collected, so later edits are not refreshed.
-Malformed JSON and files without the scraper's `source` marker are left alone.
+Only sentences containing a detected organization and qualified incident
+language are scored. **Cosine similarity** compares their embeddings with
+the disaster-phrase embeddings. It compares semantic direction rather than
+vector magnitude, so related descriptions can match despite different wording.
+
+The article score is its strongest sentence/phrase match. Internally,
+`scandal_distance = 1 - scandal_score`. Up to ten articles with supporting
+evidence and a score of at least **0.5** are flagged after all articles are
+processed. This threshold is configurable with `--min-score`; fewer than ten
+articles are flagged if fewer qualify.
+
+These are review candidates, not proof of company responsibility. ORG also
+includes institutions and teams, and the model can misinterpret context.
+
+## Main files
+
+| File | Purpose |
+| --- | --- |
+| `scraper_news.py` | Download full BBC articles and remove duplicates |
+| `nlp_enriched_news.py` | Run NLP analysis, show progress, and export the CSV |
+| `results/training_model.py` | Train and evaluate the topic classifier |
+
+Use `--help` on either main script for input paths, output paths, and other options.
