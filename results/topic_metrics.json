@@ -1,0 +1,196 @@
+{
+  "model": "TF-IDF + LogisticRegression",
+  "sklearn_version": "1.9.1",
+  "random_state": 42,
+  "data_audit": {
+    "original_training_rows": 1490,
+    "duplicate_training_rows_removed": 50,
+    "training_texts_overlapping_test_removed": 38,
+    "training_rows_used": 1402,
+    "test_rows": 735,
+    "test_rows_removed": 0
+  },
+  "source_sha256": {
+    "training": "f56a65dab2ea728505a639d2186a2b2f1c0939f28e8e89b5ed1c1fe9520b1323",
+    "test": "96181a8a76724f11ef592c1ba4dc304cdd6fc991a902fdba5c6d8955eb34a58f"
+  },
+  "training_accuracy": 1.0,
+  "test_accuracy": 0.9836734693877551,
+  "correct_test_predictions": 723,
+  "requirement_test_accuracy_above_95_percent": true,
+  "topics": [
+    "Business",
+    "Entertainment",
+    "Politics",
+    "Sport",
+    "Tech"
+  ],
+  "vocabulary_size": 39853,
+  "classification_report": {
+    "Business": {
+      "precision": 0.9606741573033708,
+      "recall": 0.9827586206896551,
+      "f1-score": 0.9715909090909091,
+      "support": 174.0
+    },
+    "Entertainment": {
+      "precision": 1.0,
+      "recall": 0.9911504424778761,
+      "f1-score": 0.9955555555555555,
+      "support": 113.0
+    },
+    "Politics": {
+      "precision": 0.9722222222222222,
+      "recall": 0.9790209790209791,
+      "f1-score": 0.975609756097561,
+      "support": 143.0
+    },
+    "Sport": {
+      "precision": 0.9939393939393939,
+      "recall": 0.9939393939393939,
+      "f1-score": 0.9939393939393939,
+      "support": 165.0
+    },
+    "Tech": {
+      "precision": 1.0,
+      "recall": 0.9714285714285714,
+      "f1-score": 0.9855072463768116,
+      "support": 140.0
+    },
+    "accuracy": 0.9836734693877551,
+    "macro avg": {
+      "precision": 0.9853671546929974,
+      "recall": 0.9836596015112951,
+      "f1-score": 0.9844405722120462,
+      "support": 735.0
+    },
+    "weighted avg": {
+      "precision": 0.983925280474237,
+      "recall": 0.9836734693877551,
+      "f1-score": 0.9837249055432664,
+      "support": 735.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      171,
+      0,
+      3,
+      0,
+      0
+    ],
+    [
+      1,
+      112,
+      0,
+      0,
+      0
+    ],
+    [
+      3,
+      0,
+      140,
+      0,
+      0
+    ],
+    [
+      1,
+      0,
+      0,
+      164,
+      0
+    ],
+    [
+      2,
+      0,
+      1,
+      1,
+      136
+    ]
+  ],
+  "learning_curves": {
+    "training_sizes": [
+      112,
+      280,
+      560,
+      840,
+      1121
+    ],
+    "training_accuracy_by_fold": [
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ]
+    ],
+    "validation_accuracy_by_fold": [
+      [
+        0.9430604982206405,
+        0.9323843416370107,
+        0.9107142857142857,
+        0.9071428571428571,
+        0.9071428571428571
+      ],
+      [
+        0.9537366548042705,
+        0.9679715302491103,
+        0.9464285714285714,
+        0.9714285714285714,
+        0.9428571428571428
+      ],
+      [
+        0.9644128113879004,
+        0.9644128113879004,
+        0.9714285714285714,
+        0.9642857142857143,
+        0.9678571428571429
+      ],
+      [
+        0.9644128113879004,
+        0.9679715302491103,
+        0.9785714285714285,
+        0.9714285714285714,
+        0.9821428571428571
+      ],
+      [
+        0.9644128113879004,
+        0.9750889679715302,
+        0.9785714285714285,
+        0.9821428571428571,
+        0.9821428571428571
+      ]
+    ],
+    "final_cv_accuracy_mean": 0.9764717844433146,
+    "final_cv_accuracy_std": 0.006573608584903129
+  }
+}

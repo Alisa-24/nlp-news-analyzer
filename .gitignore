@@ -28,11 +28,6 @@ desktop.ini
 # Generated news data
 data/
 
-# Generated model and analysis results
-results/*.pkl
-results/*.joblib
-results/*.png
-results/enhanced_news.csv
 
 # Logs
 *.log
