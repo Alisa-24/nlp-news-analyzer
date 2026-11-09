@@ -20,7 +20,7 @@ nlp-scraper/
 │   ├── topic_classifier.pkl
 │   ├── learning_curves.png
 │   ├── topic_metrics.json
-│   ├── enhanced_news.csv         # Current NLP output
+│   ├── enhancend_news.csv        # Current NLP output
 │   └── environmental_ranking.json # Earlier ranking export
 ├── pyproject.toml
 ├── requirements.txt
@@ -40,7 +40,7 @@ uv run python nlp_enriched_news.py
 ```
 
 The scraper saves articles in `data/YYYY-MM-DD/<id>.json`. The NLP script reads
-those files and saves the results to `results/enhanced_news.csv`.
+those files and saves the results to `results/enhancend_news.csv`.
 It prints progress for each article and leaves the source JSON files unchanged.
 
 The scraper collects up to 300 new articles from the past seven days per run.
@@ -71,17 +71,22 @@ and exports the CSV.
 
 ## CSV output
 
-The CSV contains exactly seven columns:
+The CSV contains these ten columns. `process_all_articles()` returns the same
+DataFrame, with Python lists in `org` and `topics` and date values in `date_scraped`.
+In the CSV, lists are stored as JSON and dates use `YYYY-MM-DD`.
 
 | Column | Description |
 | --- | --- |
 | `id` | Unique article ID |
-| `article` | Original headline and full article body |
-| `entities` | Detected organization names, stored as a JSON list |
-| `topic` | Predicted news category |
-| `sentiment` | Positive, negative, or neutral label |
-| `scandal_score` | Environmental relevance score from 0 to 1; higher means a closer match |
-| `top_10` | Whether the article is one of the ten highest-scoring review candidates |
+| `url` | Original article URL |
+| `date_scraped` | Date the article was scraped, from its saved timestamp |
+| `headline` | Original headline |
+| `body` | Full original article body |
+| `org` | List of detected organization names |
+| `topics` | List containing the predicted news category |
+| `sentiment` | VADER compound score from -1 to +1; neutral when `-0.05 < score < 0.05` |
+| `scandal_distance` | Average minimum cosine distance; lower means closer to environmental disaster phrases |
+| `top_10` | Whether the article is one of the ten lowest-distance review candidates |
 
 ## Topic model
 
@@ -124,9 +129,9 @@ to any disaster phrase. `scandal_distance` is the average of those sentence
 distances. Long sentences can use overlapping windows; only their best window
 contributes, so each original sentence counts once.
 
-The CSV uses `scandal_score = max(0, 1 - scandal_distance)`, so a higher score
-still means stronger relevance. Articles without organizations or matching
-organization-containing sentences get distance 1, score 0, and no involved organizations.
+The CSV stores `scandal_distance` directly, so a lower value means stronger
+relevance. Articles without organizations or organization-containing sentences
+get distance 1 and no involved organizations.
 
 `detect_scandal(text, entities)` returns the average distance and organization
 names from sentences with distance below 0.4 (similarity above 0.6). It matches
@@ -135,7 +140,7 @@ entity threshold is separate from the article ranking and may return an empty
 list even when an article appears in the review shortlist.
 
 After all articles are processed, the
-ten highest-scoring articles with ORG-containing sentence evidence are flagged.
+ten lowest-distance articles with ORG-containing sentence evidence are flagged.
 There is no fixed similarity cutoff. If fewer than ten articles contain an
 ORG sentence, only those articles can be flagged. Ties keep input order.
 

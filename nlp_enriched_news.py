@@ -330,7 +330,7 @@ class NewsNLP:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         root = Path(__file__).resolve().parent
         input_dir = Path(input_dir) if input_dir is not None else root / "data"
-        output_file = Path(output_file) if output_file is not None else root / "results" / "enhanced_news.csv"
+        output_file = Path(output_file) if output_file is not None else root / "results" / "enhancend_news.csv"
         input_dir = input_dir.resolve()
         output_file = output_file.resolve()
 
@@ -360,9 +360,10 @@ class NewsNLP:
                 article = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(article, dict) or not all(
                     isinstance(article.get(field), str) and article[field].strip()
-                    for field in ("id", "headline", "body")
+                    for field in ("id", "url", "date_scraped", "headline", "body")
                 ):
-                    raise ValueError("Missing id, headline or body")
+                    raise ValueError("Missing id, url, date_scraped, headline or body")
+                article["date_scraped"] = date.fromisoformat(article["date_scraped"][:10])
             except (OSError, ValueError) as error:
                 skipped += 1
                 self._log(f"[{index}/{len(paths)}] Skipping {path}: {error}")
@@ -378,8 +379,8 @@ class NewsNLP:
 
         # Rank after every article has a score.
         self._log("\nRanking environmental review candidates...")
-        self._log("Ranking rule: select the 10 highest-scoring articles with ORG evidence.")
-        articles.sort(key=lambda article: article["environmental_risk_score"], reverse=True)
+        self._log("Ranking rule: select the 10 lowest-distance articles with ORG evidence.")
+        articles.sort(key=lambda article: article["scandal_distance"])
         candidate_rank = 0
         for article in articles:
             article["environmental_rank"] = None
@@ -397,27 +398,33 @@ class NewsNLP:
             self._log("  None.")
         for rank, article in enumerate(flagged_articles, start=1):
             self._log(f"{rank}. {article['headline']}")
-            self._log(f"   ID: {article['id']} | Scandal score: {article['environmental_risk_score']:.4f}")
+            self._log(f"   ID: {article['id']} | Scandal distance: {article['scandal_distance']:.4f}")
 
-        # Export only the seven requested fields.
+        # Keep lists in the DataFrame; encode them as JSON only for the CSV.
         rows = []
         for article in articles:
             rows.append({
                 "id": article["id"],
-                "article": f"{article['headline']}\n\n{article['body']}",
-                "entities": json.dumps(article["org"], ensure_ascii=False),
-                "topic": article["topic"],
-                "sentiment": article["sentiment"],
-                "scandal_score": article["environmental_risk_score"],
+                "url": article["url"],
+                "date_scraped": article["date_scraped"],
+                "headline": article["headline"],
+                "body": article["body"],
+                "org": article["org"],
+                "topics": [article["topic"]],
+                "sentiment": article["sentiment_scores"]["compound"],
+                "scandal_distance": article["scandal_distance"],
                 "top_10": article["top_10"],
             })
 
         results = pd.DataFrame(rows)
+        csv_results = results.copy()
+        for column in ("org", "topics"):
+            csv_results[column] = csv_results[column].map(lambda names: json.dumps(names, ensure_ascii=False))
         output_file.parent.mkdir(parents=True, exist_ok=True)
         self._log(f"\nSaving {output_file}...")
         temporary = output_file.with_suffix(".tmp")
         try:
-            results.to_csv(temporary, index=False, encoding="utf-8")
+            csv_results.to_csv(temporary, index=False, encoding="utf-8")
             temporary.replace(output_file)
         finally:
             temporary.unlink(missing_ok=True)
