@@ -1,158 +1,196 @@
 # NLP News Intelligence
 
-A Python project that collects BBC news and analyzes each article to identify
-organizations, topics, sentiment, and possible environmental incidents.
+Collect BBC news articles and enrich them with organization names, topics,
+sentiment scores, and an environmental-incident review shortlist.
 
-## Project structure
+The project combines RSS collection, full-article extraction, spaCy, a trained
+TF-IDF topic classifier, VADER sentiment analysis, and sentence embeddings.
 
-```text
-nlp-scraper/
-├── scraper_news.py               # Scraper for BBC news articles
-├── nlp_enriched_news.py          # nlp pipeline for topics, sentiment, and environmental scoring
-├── main.py                       # Starter script
-├── bbc_news_train.csv
-├── bbc_news_tests.csv
-├── data/                         # Scraped articles
-│   └── YYYY-MM-DD/
-│       └── <article-id>.json
-├── results/
-│   ├── training_model.py
-│   ├── topic_classifier.pkl
-│   ├── learning_curves.png
-│   ├── topic_metrics.json
-│   ├── enhancend_news.csv        # Current NLP output
-│   └── environmental_ranking.json # Earlier ranking export
-├── pyproject.toml
-├── requirements.txt
-├── uv.lock
-└── README.md
-```
+## Quick start
 
-## Setup and run
+Requires **Python 3.12+** and **uv**. From the project folder, run:
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/). Run these commands
-from the project folder:
-
-```powershell
+```bash
 uv sync
 uv run python scraper_news.py
 uv run python nlp_enriched_news.py
 ```
 
-The scraper saves articles in `data/YYYY-MM-DD/<id>.json`. The NLP script reads
-those files and saves the results to `results/enhancend_news.csv`.
-It prints progress for each article and leaves the source JSON files unchanged.
+1. `uv sync` installs the dependencies and the spaCy English model.
+2. The scraper saves articles to `data/YYYY-MM-DD/<article-id>.json`.
+3. The NLP pipeline reads those articles and exports `results/enhancend_news.csv`.
 
-The scraper collects up to 300 new articles from the past seven days per run.
-It removes duplicates by URL or normalized article text. RSS may provide fewer
-than 300 articles; later runs can collect new stories.
+The pipeline prints progress and leaves the source JSON files unchanged.
+`uv run python main.py` is an alternative entry point for the same NLP command.
 
-Pretrained resources download when needed. If the topic model is missing,
-it is automatically trained on `bbc_news_train.csv` and evaluated on
-`bbc_news_tests.csv`.
+The VADER lexicon and sentence-embedding model download when first needed.
+If the topic classifier is missing, the pipeline trains it using the included datasets.
 
-## What the NLP pipeline does
+## Usage
 
-All analysis is handled by the `NewsNLP` class in `nlp_enriched_news.py`:
+### Collect articles
 
-1. **Preprocessing:** spaCy keeps alphabetic words, removes stop words, and returns
-   lowercase lemmas as one cleaned string.
-2. **Entities:** spaCy NER returns a list of unique `ORG` names from the original
-   headline and body.
-3. **Topics:** TF-IDF and logistic regression predict Tech, Sport, Business,
-   Entertainment, or Politics.
-4. **Sentiment:** NLTK VADER predicts positive, negative, or neutral.
-5. **Environmental incidents:** sentence embeddings score relevant organization-linked
-   sentences against specific disaster phrases.
+By default, the scraper reads BBC news and sport RSS feeds and saves up to
+**300 new articles from the past seven days**. It removes duplicate stored
+records by normalized URL or article text and skips articles already collected.
+Redirected articles are saved under their final normalized BBC URL.
 
-`process_article()` returns the analysis for one article.
-`process_all_articles()` processes the saved collection, ranks candidates,
-and exports the CSV.
+```bash
+uv run python scraper_news.py --days 3 --max-articles 100 --delay 1
+```
+
+To use a specific feed and output folder:
+
+```bash
+uv run python scraper_news.py --feed https://feeds.bbci.co.uk/news/business/rss.xml --output-dir data
+```
+
+Repeat `--feed` to read multiple feeds. RSS feeds may contain fewer articles than
+requested; later runs can collect newly published stories.
+
+### Analyze articles
+
+```bash
+uv run python nlp_enriched_news.py
+```
+
+To use custom input and output paths:
+
+```bash
+uv run python nlp_enriched_news.py --input-dir data --output-file results/news_analysis.csv
+```
+
+Input articles must be stored in dated folders, such as `data/2026-11-03/`.
+The output must be a CSV outside the input folder and cannot overwrite either
+training dataset. Invalid article records are skipped and reported in the progress log.
+
+Use `--help` to see the options for each command:
+
+```bash
+uv run python scraper_news.py --help
+uv run python nlp_enriched_news.py --help
+uv run python results/training_model.py --help
+```
+
+## Analysis pipeline
+
+| Step | Method | Result |
+| --- | --- | --- |
+| Text preprocessing | spaCy lemmatization and stop-word removal | Cleaned headline and body |
+| Organization extraction | spaCy named entity recognition | Unique `ORG` names from the original text |
+| Topic classification | TF-IDF and logistic regression | Business, Entertainment, Politics, Sport, or Tech |
+| Sentiment analysis | NLTK VADER on the original text | Sentiment label and compound score |
+| Environmental scoring | Sentence embeddings and cosine distance | Organization-linked evidence and review ranking |
+
+`NewsNLP.process_article()` returns the detailed analysis for a single article.
+`NewsNLP.process_all_articles()` processes the collection, ranks review candidates,
+exports the CSV, and returns a pandas DataFrame.
 
 ## CSV output
 
-The CSV contains these ten columns. `process_all_articles()` returns the same
-DataFrame, with Python lists in `org` and `topics` and date values in `date_scraped`.
-In the CSV, lists are stored as JSON and dates use `YYYY-MM-DD`.
+The default output is **`results/enhancend_news.csv`**. The filename retains the
+project's existing spelling; use `--output-file` to choose another name.
 
 | Column | Description |
 | --- | --- |
 | `id` | Unique article ID |
-| `url` | Original article URL |
-| `date_scraped` | Date the article was scraped, from its saved timestamp |
+| `url` | Stored article URL |
+| `date_scraped` | Collection date in `YYYY-MM-DD` format |
 | `headline` | Original headline |
-| `body` | Full original article body |
-| `org` | List of detected organization names |
-| `topics` | List containing the predicted news category |
-| `sentiment` | VADER compound score from -1 to +1; neutral when `-0.05 < score < 0.05` |
-| `scandal_distance` | Average minimum cosine distance; lower means closer to environmental disaster phrases |
-| `top_10` | Whether the article is one of the ten lowest-distance review candidates |
+| `body` | Full extracted article text |
+| `org` | Detected organization names, stored as a JSON list |
+| `topics` | Predicted topic, stored as a one-item JSON list |
+| `sentiment` | VADER compound score from -1 to +1 |
+| `scandal_distance` | Average minimum cosine distance to environmental-disaster phrases; lower means more similar |
+| `top_10` | Whether the article is included in the environmental review shortlist |
 
-## Topic model
+For sentiment, scores of at least `0.05` are positive, scores of at most `-0.05`
+are negative, and scores between those thresholds are neutral. The CSV stores
+the numeric score; the detailed article analysis also includes the label.
 
-The supplied datasets are `bbc_news_train.csv` and `bbc_news_tests.csv`.
-Training removes duplicate and overlapping training texts in memory without
-changing either CSV. The saved model achieved **98.37% test accuracy**
-(723/735 correct) and **97.65% five-fold validation accuracy**.
-
-To retrain and regenerate the learning curves:
-
-```powershell
-uv run python results/training_model.py
-```
-
-The script saves:
-
-- `results/topic_classifier.pkl`: TF-IDF vectorizer and logistic regression together.
-- `results/learning_curves.png`: training and validation learning curves.
-- `results/topic_metrics.json`: evaluation scores and data checks.
+The returned DataFrame retains Python lists in `org` and `topics` and date values
+in `date_scraped`. CSV export serializes the lists as JSON.
 
 ## Environmental scoring
 
-The keywords are specific phrases such as **oil spill**, **toxic wastewater
-discharge**, **illegal logging**, and **hazardous gas leak**. They cover water
-pollution, air pollution, deforestation, soil contamination, marine damage,
-and industrial disasters. These specific phrases are the embedding references;
-standalone words such as fire, gas, or disaster are not used as reference phrases.
+The pipeline uses `sentence-transformers/all-MiniLM-L6-v2` to compare sentences
+containing detected organizations with 15 environmental-disaster phrases.
+These include **oil spill**, **toxic wastewater discharge**, **illegal logging**,
+and **hazardous gas leak** across six categories: water pollution, air pollution,
+deforestation, soil contamination, marine damage, and industrial disasters.
 
-We use [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
-because it is a small pretrained sentence-embedding model that runs on CPU
-and captures meaning beyond exact word matches.
+For each organization-containing sentence:
 
-Every sentence containing a detected organization is scored, without requiring
-an exact keyword or regex match. **Cosine similarity** compares its embedding with
-the disaster-phrase embeddings. It compares semantic direction rather than
-vector magnitude, so related descriptions can match despite different wording.
+1. Generate its sentence embedding.
+2. Compare it with each reference phrase using cosine similarity.
+3. Keep the closest phrase and calculate distance as `1 - similarity`.
 
-For each ORG-containing sentence, the model finds the minimum cosine distance
-to any disaster phrase. `scandal_distance` is the average of those sentence
-distances. Long sentences can use overlapping windows; only their best window
-contributes, so each original sentence counts once.
+The article's `scandal_distance` is the average of these sentence distances.
+Long sentences use overlapping token windows, with only the best window
+contributing for each original sentence. Organization matching uses whole names
+and ignores case, so `AI` does not match `chair`.
 
-The CSV stores `scandal_distance` directly, so a lower value means stronger
-relevance. Articles without organizations or organization-containing sentences
-get distance 1 and no involved organizations.
+Articles without organization-containing sentences receive distance `1` and are
+excluded from the shortlist. Among eligible articles, the ten lowest-distance
+articles receive `top_10 = True`. Fewer than ten are flagged when fewer qualify.
+There is no fixed shortlist cutoff, and ties preserve input order.
 
-`detect_scandal(text, entities)` returns the average distance and organization
-names from sentences with distance below 0.4 (similarity above 0.6). It matches
-whole organization names without case sensitivity, so `AI` does not match `chair`. This strict
-entity threshold is separate from the article ranking and may return an empty
-list even when an article appears in the review shortlist.
+The detailed analysis separately reports organizations from sentences with
+distance below `0.4` through `scandal_entities`. This stricter threshold does not
+determine shortlist membership.
 
-After all articles are processed, the
-ten lowest-distance articles with ORG-containing sentence evidence are flagged.
-There is no fixed similarity cutoff. If fewer than ten articles contain an
-ORG sentence, only those articles can be flagged. Ties keep input order.
+**The shortlist supports human review.** Organization mentions and semantic
+similarity do not establish responsibility for an environmental incident.
+Detected organizations can also include institutions and sports teams.
 
-These are review candidates, not proof of company responsibility. ORG also
-includes institutions and teams, and the model can misinterpret context.
+## Topic classifier
 
-## Main files
+The classifier predicts five categories using a TF-IDF vectorizer and logistic
+regression saved together in one scikit-learn pipeline.
 
-| File | Purpose |
+| Metric | Result |
 | --- | --- |
-| `scraper_news.py` | Download full BBC articles and remove duplicates |
-| `nlp_enriched_news.py` | Run NLP analysis, show progress, and export the CSV |
-| `results/training_model.py` | Train and evaluate the topic classifier |
+| Held-out evaluation accuracy | **98.37%** — 723 of 735 articles |
+| Five-fold cross-validation accuracy | **97.65%** |
+| Training articles used after cleanup | **1,402** |
 
-Use `--help` on either main script for input paths, output paths, and other options.
+Training uses `bbc_news_train.csv`, and held-out evaluation uses
+`bbc_news_tests.csv`. Duplicate training stories and training stories shared
+with the evaluation dataset are removed in memory; the source CSVs stay unchanged.
+
+To retrain the classifier and regenerate its evaluation artifacts:
+
+```bash
+uv run python results/training_model.py
+```
+
+This writes:
+
+- `results/topic_classifier.pkl` — fitted vectorizer and classifier.
+- `results/learning_curves.png` — training and cross-validation learning curves.
+- `results/topic_metrics.json` — evaluation metrics and dataset audit.
+
+## Project structure
+
+```text
+nlp-scraper/
+├── main.py                       # Alternative NLP entry point
+├── scraper_news.py               # BBC RSS collection and article extraction
+├── nlp_enriched_news.py          # NLP enrichment, ranking, and CSV export
+├── bbc_news_train.csv            # Topic training dataset
+├── bbc_news_tests.csv            # Held-out topic evaluation dataset
+├── data/                        # Collected articles; ignored by Git
+│   └── YYYY-MM-DD/
+│       └── <article-id>.json
+├── results/
+│   ├── training_model.py         # Topic model training and evaluation
+│   ├── topic_classifier.pkl      # Saved topic pipeline
+│   ├── topic_metrics.json        # Evaluation metrics
+│   ├── learning_curves.png       # Learning curve chart
+│   ├── enhancend_news.csv        # Default NLP export
+│   └── environmental_ranking.json # Earlier ranking export
+├── pyproject.toml               # Project metadata and dependencies
+├── requirements.txt             # Pinned dependency list
+├── uv.lock                      # Dependency lockfile
+└── README.md
+```

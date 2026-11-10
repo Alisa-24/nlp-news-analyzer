@@ -3,23 +3,23 @@
 import argparse
 import hashlib
 import json
-from pathlib import Path
 import pickle
+from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.ticker import PercentFormatter
 import numpy as np
 import pandas as pd
 import sklearn
+from matplotlib.ticker import PercentFormatter
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import StratifiedKFold, learning_curve
 from sklearn.pipeline import Pipeline
 from threadpoolctl import threadpool_limits
-
 
 ROOT = Path(__file__).resolve().parents[1]
 TOPICS = {
@@ -42,7 +42,9 @@ def load_data(path):
     if data.empty or not valid_text.all():
         raise ValueError(f"{path} contains missing or empty article text")
 
-    categories = data["Category"].str.strip().str.lower()
+    categories = data["Category"].map(
+        lambda category: category.strip().lower() if isinstance(category, str) else None
+    )
     data["Category"] = categories.map(TOPICS)
     if data["Category"].isna().any():
         raise ValueError(f"{path} contains missing or unsupported categories")
@@ -99,10 +101,12 @@ def build_classifier():
     classifier = LogisticRegression(C=5.0, max_iter=2000, random_state=42)
 
     # Saving one pipeline also saves the vocabulary needed for prediction.
-    return Pipeline([
-        ("tfidf", vectorizer),
-        ("logistic_regression", classifier),
-    ])
+    return Pipeline(
+        [
+            ("tfidf", vectorizer),
+            ("logistic_regression", classifier),
+        ]
+    )
 
 
 def plot_learning_curves(model, texts, labels, output_dir):
@@ -147,9 +151,11 @@ def plot_learning_curves(model, texts, labels, output_dir):
     axes.grid(alpha=0.2)
     axes.legend(loc="lower right")
     figure.text(
-        0.5, 0.015,
+        0.5,
+        0.015,
         "Shading: ±1 standard deviation. The held-out test set is not used in these curves.",
-        ha="center", fontsize=8,
+        ha="center",
+        fontsize=8,
     )
     figure.tight_layout(rect=(0, 0.04, 1, 1))
     figure.savefig(output_dir / "learning_curves.png", dpi=180)
@@ -178,10 +184,15 @@ def evaluate_model(model, train, test):
         "topics": model.classes_.tolist(),
         "vocabulary_size": len(model.named_steps["tfidf"].vocabulary_),
         "classification_report": classification_report(
-            expected_topics, predictions, output_dict=True, zero_division=0,
+            expected_topics,
+            predictions,
+            output_dict=True,
+            zero_division=0,
         ),
         "confusion_matrix": confusion_matrix(
-            expected_topics, predictions, labels=model.classes_,
+            expected_topics,
+            predictions,
+            labels=model.classes_,
         ).tolist(),
     }
     return metrics, predictions
@@ -196,11 +207,14 @@ def save_results(model, metrics, output_dir, model_filename):
 
 
 def train_model(train_path, test_path, output_dir, model_filename="topic_classifier.pkl"):
+    train_path, test_path, output_dir = Path(train_path), Path(test_path), Path(output_dir)
     train = load_data(train_path)
     test = load_data(test_path)
     train, audit = prepare_training_data(train, test)
 
-    print(f"Training rows: {audit['training_rows_used']}; test rows: {audit['test_rows']}", flush=True)
+    print(
+        f"Training rows: {audit['training_rows_used']}; test rows: {audit['test_rows']}", flush=True
+    )
     print(
         f"Excluded in memory: {audit['duplicate_training_rows_removed']} duplicate training rows, "
         f"{audit['training_texts_overlapping_test_removed']} training texts shared with test.",
@@ -218,17 +232,19 @@ def train_model(train_path, test_path, output_dir, model_filename="topic_classif
         model.fit(train["Text"], train["Category"])
         metrics, predictions = evaluate_model(model, train, test)
 
-    metrics.update({
-        "model": "TF-IDF + LogisticRegression",
-        "sklearn_version": sklearn.__version__,
-        "random_state": 42,
-        "data_audit": audit,
-        "source_sha256": {
-            "training": hashlib.sha256(train_path.read_bytes()).hexdigest(),
-            "test": hashlib.sha256(test_path.read_bytes()).hexdigest(),
-        },
-        "learning_curves": curves,
-    })
+    metrics.update(
+        {
+            "model": "TF-IDF + LogisticRegression",
+            "sklearn_version": sklearn.__version__,
+            "random_state": 42,
+            "data_audit": audit,
+            "source_sha256": {
+                "training": hashlib.sha256(train_path.read_bytes()).hexdigest(),
+                "test": hashlib.sha256(test_path.read_bytes()).hexdigest(),
+            },
+            "learning_curves": curves,
+        }
+    )
     save_results(model, metrics, output_dir, model_filename)
 
     print(classification_report(test["Category"], predictions, digits=4, zero_division=0))
@@ -242,12 +258,12 @@ def train_model(train_path, test_path, output_dir, model_filename="topic_classif
     return metrics
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train-csv", type=Path, default=ROOT / "bbc_news_train.csv")
     parser.add_argument("--test-csv", type=Path, default=ROOT / "bbc_news_tests.csv")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "results")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     metrics = train_model(args.train_csv, args.test_csv, args.output_dir)
     if not metrics["requirement_test_accuracy_above_95_percent"]:

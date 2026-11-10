@@ -1,23 +1,26 @@
 """NLP analysis and environmental-disaster ranking for news articles."""
 
 import argparse
-from datetime import date
 import json
-from pathlib import Path
 import pickle
 import sys
+from datetime import date, datetime
+from pathlib import Path
+from typing import ClassVar
 
 import nltk
+import pandas as pd
+import spacy
 from nltk.sentiment import SentimentIntensityAnalyzer
 from sklearn.metrics.pairwise import cosine_similarity
-import spacy
 from spacy.matcher import PhraseMatcher
-import pandas as pd
 
 
 class NewsNLP:
+    """Enrich articles while loading expensive models only when needed."""
+
     ENVIRONMENTAL_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-    DISASTER_KEYWORDS = {
+    DISASTER_KEYWORDS: ClassVar[dict[str, tuple[str, ...]]] = {
         "Water pollution": ("oil spill", "toxic wastewater discharge", "chemical contamination"),
         "Air pollution": ("toxic emissions", "hazardous gas leak", "industrial air pollution"),
         "Deforestation": ("illegal logging", "forest clearance", "unauthorized deforestation"),
@@ -26,11 +29,11 @@ class NewsNLP:
         "Industrial disasters": ("industrial chemical leak", "hazardous waste spill"),
     }
     DISASTER_PHRASES = tuple(phrase for phrases in DISASTER_KEYWORDS.values() for phrase in phrases)
-    PHRASE_CATEGORIES = {
+    PHRASE_CATEGORIES: ClassVar[dict[str, str]] = {
         phrase: category for category, phrases in DISASTER_KEYWORDS.items() for phrase in phrases
     }
 
-    TOPICS = {
+    TOPICS: ClassVar[dict[str, str]] = {
         "tech": "Tech",
         "sport": "Sport",
         "business": "Business",
@@ -42,7 +45,8 @@ class NewsNLP:
         self.verbose = verbose
         self._log(f"Loading spaCy model: {spacy_model}...")
         self.nlp = spacy.load(spacy_model, exclude=["parser"])
-        self.nlp.add_pipe("sentencizer")
+        if not self.nlp.has_pipe("sentencizer"):
+            self.nlp.add_pipe("sentencizer")
         self._log("spaCy model ready.")
 
         if topic_model_path is None:
@@ -62,8 +66,7 @@ class NewsNLP:
     def preprocess_text(self, text):
         document = self.nlp(text, disable=["ner"])
         return " ".join(
-            token.lemma_.lower() for token in document
-            if token.is_alpha and not token.is_stop
+            token.lemma_.lower() for token in document if token.is_alpha and not token.is_stop
         )
 
     def detect_entities(self, headline, body):
@@ -120,13 +123,13 @@ class NewsNLP:
         self._log("  Loading NLTK VADER sentiment analyzer...")
         try:
             self.sentiment_analyzer = SentimentIntensityAnalyzer()
-        except LookupError:
+        except LookupError as error:
             self._log("  VADER lexicon missing. Downloading vader_lexicon...")
             downloaded = nltk.download("vader_lexicon", quiet=True)
             if not downloaded:
                 raise RuntimeError(
                     "Could not download the NLTK VADER lexicon. Check your connection and try again."
-                )
+                ) from error
             self.sentiment_analyzer = SentimentIntensityAnalyzer()
         self._log("  Sentiment analyzer ready.")
 
@@ -172,75 +175,17 @@ class NewsNLP:
             self._log("  ORG-containing sentences to score: 0")
             return result
 
-        # Match full organization names rather than substrings.
-        matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
-        matcher.add("ORG", [self.nlp.make_doc(name) for name in entities])
-        sentences = []
-        sentencizer = self.nlp.get_pipe("sentencizer")
-        for field, text in (("headline", headline), ("body", body)):
-            document = sentencizer(self.nlp.make_doc(text))
-            for sentence in document.sents:
-                sentence_doc = sentence.as_doc()
-                organizations = list(dict.fromkeys(
-                    sentence_doc[start:end].text
-                    for _, start, end in matcher(sentence_doc)
-                ))
-                if not organizations:
-                    continue
-
-                sentences.append({
-                    "field": field,
-                    "sentence": sentence.text,
-                    "start_char": sentence.start_char,
-                    "end_char": sentence.end_char,
-                    "organizations": organizations,
-                })
-
+        sentences = self._organization_sentences(headline, body, entities)
         self._log(f"  ORG-containing sentences to score: {len(sentences)}")
         if not sentences:
             return result
 
-        # Load the encoder and embed the disaster phrases once.
-        if self.environmental_model is None:
-            self._log(f"  Loading sentence embedding model: {self.ENVIRONMENTAL_MODEL}...")
-            import torch
-            from sentence_transformers import SentenceTransformer
-
-            torch.set_num_threads(min(4, torch.get_num_threads()))
-            self.environmental_model = SentenceTransformer(self.ENVIRONMENTAL_MODEL, device="cpu")
-            self._log(f"  Embedding {len(self.DISASTER_PHRASES)} disaster phrases...")
-            self.disaster_embeddings = self.environmental_model.encode(
-                list(self.DISASTER_PHRASES), normalize_embeddings=True, show_progress_bar=False,
-            )
-            self._log("  Environmental model ready.")
-
-        chunks = []
-        source_sentences = []
-        tokenizer = self.environmental_model.tokenizer
-        window_size = self.environmental_model.max_seq_length - tokenizer.num_special_tokens_to_add(pair=False)
-
-        # Window long sentences so evidence near the end is not truncated.
-        for sentence in sentences:
-            text = sentence["sentence"]
-            tokens = tokenizer(
-                text, add_special_tokens=False, return_offsets_mapping=True,
-                truncation=False, verbose=False,
-            )
-            offsets = tokens["offset_mapping"]
-            if len(offsets) <= window_size:
-                chunks.append(text)
-                source_sentences.append(sentence)
-                continue
-
-            for start in range(0, len(offsets), max(1, window_size - 32)):
-                end = min(start + window_size, len(offsets))
-                chunks.append(text[offsets[start][0]:offsets[end - 1][1]])
-                source_sentences.append(sentence)
-                if end == len(offsets):
-                    break
-
+        self._load_environmental_model()
+        chunks, source_sentences = self._sentence_chunks(sentences)
         embeddings = self.environmental_model.encode(
-            chunks, normalize_embeddings=True, show_progress_bar=False,
+            chunks,
+            normalize_embeddings=True,
+            show_progress_bar=False,
         )
         similarities = cosine_similarity(embeddings, self.disaster_embeddings)
 
@@ -249,7 +194,6 @@ class NewsNLP:
             phrase_index = int(similarities[index].argmax())
             phrase = self.DISASTER_PHRASES[phrase_index]
             score = min(1.0, max(-1.0, float(similarities[index, phrase_index])))
-            distance = 1.0 - score
             key = (sentence["field"], sentence["start_char"], sentence["end_char"])
             if key not in best_matches or score > best_matches[key]["similarity"]:
                 best_matches[key] = {
@@ -258,12 +202,12 @@ class NewsNLP:
                     "matched_phrase": phrase,
                     "matched_category": self.PHRASE_CATEGORIES[phrase],
                     "similarity": score,
-                    "distance": distance,
+                    "distance": 1.0 - score,
                 }
 
         evidence = sorted(best_matches.values(), key=lambda match: match["distance"])
         # Each original sentence contributes once, even when split into windows.
-        average_distance = float(sum(match["distance"] for match in evidence) / len(evidence))
+        average_distance = sum(match["distance"] for match in evidence) / len(evidence)
         scandal_entities = []
         seen_entities = set()
         for match in evidence:
@@ -274,11 +218,100 @@ class NewsNLP:
                         seen_entities.add(key)
                         scandal_entities.append(name)
 
-        result["environmental_evidence"] = evidence
-        result["scandal_distance"] = average_distance
-        result["environmental_risk_score"] = max(0.0, 1.0 - average_distance)
-        result["scandal_entities"] = scandal_entities
+        result.update(
+            {
+                "environmental_evidence": evidence,
+                "scandal_distance": average_distance,
+                "environmental_risk_score": max(0.0, 1.0 - average_distance),
+                "scandal_entities": scandal_entities,
+            }
+        )
         return result
+
+    def _organization_sentences(self, headline, body, entities):
+        """Find sentences containing whole organization names, ignoring case."""
+        matcher = PhraseMatcher(self.nlp.vocab, attr="LOWER")
+        matcher.add("ORG", [self.nlp.make_doc(name) for name in entities])
+        sentences = []
+        sentencizer = self.nlp.get_pipe("sentencizer")
+        for field, text in (("headline", headline), ("body", body)):
+            document = sentencizer(self.nlp.make_doc(text))
+            for sentence in document.sents:
+                sentence_doc = sentence.as_doc()
+                organizations = list(
+                    dict.fromkeys(
+                        sentence_doc[start:end].text for _, start, end in matcher(sentence_doc)
+                    )
+                )
+                if not organizations:
+                    continue
+
+                sentences.append(
+                    {
+                        "field": field,
+                        "sentence": sentence.text,
+                        "start_char": sentence.start_char,
+                        "end_char": sentence.end_char,
+                        "organizations": organizations,
+                    }
+                )
+
+        return sentences
+
+    def _load_environmental_model(self):
+        """Cache the encoder only after its reference embeddings are ready."""
+        if self.environmental_model is None or self.disaster_embeddings is None:
+            self._log(f"  Loading sentence embedding model: {self.ENVIRONMENTAL_MODEL}...")
+            import torch
+            from sentence_transformers import SentenceTransformer
+
+            torch.set_num_threads(min(4, torch.get_num_threads()))
+            model = SentenceTransformer(self.ENVIRONMENTAL_MODEL, device="cpu")
+            self._log(f"  Embedding {len(self.DISASTER_PHRASES)} disaster phrases...")
+            embeddings = model.encode(
+                list(self.DISASTER_PHRASES),
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            self.environmental_model = model
+            self.disaster_embeddings = embeddings
+            self._log("  Environmental model ready.")
+
+    def _sentence_chunks(self, sentences):
+        """Window long sentences and retain their source for per-sentence scoring."""
+        chunks = []
+        source_sentences = []
+        tokenizer = self.environmental_model.tokenizer
+        window_size = self.environmental_model.max_seq_length - tokenizer.num_special_tokens_to_add(
+            pair=False
+        )
+        if window_size < 1:
+            raise ValueError("The embedding model must allow at least one content token.")
+
+        # Window long sentences so evidence near the end is not truncated.
+        for sentence in sentences:
+            text = sentence["sentence"]
+            tokens = tokenizer(
+                text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+                truncation=False,
+                verbose=False,
+            )
+            offsets = tokens["offset_mapping"]
+            if len(offsets) <= window_size:
+                chunks.append(text)
+                source_sentences.append(sentence)
+                continue
+
+            for start in range(0, len(offsets), max(1, window_size - 32)):
+                end = min(start + window_size, len(offsets))
+                chunks.append(text[offsets[start][0] : offsets[end - 1][1]])
+                source_sentences.append(sentence)
+                if end == len(offsets):
+                    break
+
+        return chunks, source_sentences
 
     def process_article(self, article, include_topic=True, include_environment=True):
         headline = article["headline"]
@@ -294,11 +327,13 @@ class NewsNLP:
 
         # Enrich a copy; the original article stays unchanged.
         result = article.copy()
-        result.update({
-            "cleaned_headline": cleaned_headline,
-            "cleaned_body": cleaned_body,
-            "cleaned_text": cleaned_text,
-        })
+        result.update(
+            {
+                "cleaned_headline": cleaned_headline,
+                "cleaned_body": cleaned_body,
+                "cleaned_text": cleaned_text,
+            }
+        )
         self._log("Detecting organizations...")
         entities = self.detect_entities(headline, body)
         result["org"] = entities
@@ -326,11 +361,13 @@ class NewsNLP:
 
     def process_all_articles(self, input_dir=None, output_file=None, verbose=True):
         self.verbose = verbose
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         root = Path(__file__).resolve().parent
         input_dir = Path(input_dir) if input_dir is not None else root / "data"
-        output_file = Path(output_file) if output_file is not None else root / "results" / "enhancend_news.csv"
+        output_file = (
+            Path(output_file)
+            if output_file is not None
+            else root / "results" / "enhancend_news.csv"
+        )
         input_dir = input_dir.resolve()
         output_file = output_file.resolve()
 
@@ -363,7 +400,7 @@ class NewsNLP:
                     for field in ("id", "url", "date_scraped", "headline", "body")
                 ):
                     raise ValueError("Missing id, url, date_scraped, headline or body")
-                article["date_scraped"] = date.fromisoformat(article["date_scraped"][:10])
+                article["date_scraped"] = datetime.fromisoformat(article["date_scraped"]).date()
             except (OSError, ValueError) as error:
                 skipped += 1
                 self._log(f"[{index}/{len(paths)}] Skipping {path}: {error}")
@@ -398,28 +435,34 @@ class NewsNLP:
             self._log("  None.")
         for rank, article in enumerate(flagged_articles, start=1):
             self._log(f"{rank}. {article['headline']}")
-            self._log(f"   ID: {article['id']} | Scandal distance: {article['scandal_distance']:.4f}")
+            self._log(
+                f"   ID: {article['id']} | Scandal distance: {article['scandal_distance']:.4f}"
+            )
 
         # Keep lists in the DataFrame; encode them as JSON only for the CSV.
         rows = []
         for article in articles:
-            rows.append({
-                "id": article["id"],
-                "url": article["url"],
-                "date_scraped": article["date_scraped"],
-                "headline": article["headline"],
-                "body": article["body"],
-                "org": article["org"],
-                "topics": [article["topic"]],
-                "sentiment": article["sentiment_scores"]["compound"],
-                "scandal_distance": article["scandal_distance"],
-                "top_10": article["top_10"],
-            })
+            rows.append(
+                {
+                    "id": article["id"],
+                    "url": article["url"],
+                    "date_scraped": article["date_scraped"],
+                    "headline": article["headline"],
+                    "body": article["body"],
+                    "org": article["org"],
+                    "topics": [article["topic"]],
+                    "sentiment": article["sentiment_scores"]["compound"],
+                    "scandal_distance": article["scandal_distance"],
+                    "top_10": article["top_10"],
+                }
+            )
 
         results = pd.DataFrame(rows)
         csv_results = results.copy()
         for column in ("org", "topics"):
-            csv_results[column] = csv_results[column].map(lambda names: json.dumps(names, ensure_ascii=False))
+            csv_results[column] = csv_results[column].map(
+                lambda names: json.dumps(names, ensure_ascii=False)
+            )
         output_file.parent.mkdir(parents=True, exist_ok=True)
         self._log(f"\nSaving {output_file}...")
         temporary = output_file.with_suffix(".tmp")
@@ -435,11 +478,15 @@ class NewsNLP:
         return results
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Enrich all stored articles and save the results to CSV.")
+def main(argv=None):
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(
+        description="Enrich all stored articles and save the results to CSV."
+    )
     parser.add_argument("--input-dir", type=Path)
     parser.add_argument("--output-file", type=Path)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         NewsNLP(verbose=True).process_all_articles(args.input_dir, args.output_file)
     except (OSError, ValueError) as error:

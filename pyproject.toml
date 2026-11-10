@@ -1,7 +1,7 @@
 [project]
 name = "nlp-scraper"
 version = "0.1.0"
-description = "Add your description here"
+description = "Collect BBC news and analyze topics, sentiment, and environmental incidents"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,13 +9,27 @@ dependencies = [
     "feedparser>=6.0.14",
     "matplotlib>=3.10,<4",
     "nltk>=3.9,<4",
+    "numpy>=1.26,<3",
     "pandas>=3.0.6",
     "requests>=2.34.2",
     "scikit-learn>=1.7,<2",
     "sentence-transformers>=3.4,<6",
     "spacy>=3.8,<3.9",
+    "threadpoolctl>=3.1,<4",
     "trafilatura>=2.3.1",
 ]
 
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
 [tool.uv.sources]
 en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.4",
+]
